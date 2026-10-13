@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rayos ⚡ - TikTok LIVE 9:16</title>
+<!--
+  RAYOS ⚡ PARA TIKTOK LIVE (vertical 9:16, fondo transparente)
+  Partículas con forma de rayo, como el de tu logo.
+
+  Ajustes por URL, por ejemplo:  archivo.html?opacidad=.5&cantidad=.8
+
+    color       amarillo | azul | morado | verde | rojo   (por defecto amarillo)
+    opacidad    0.05 - 1   transparencia general (por defecto .48)
+    cantidad    0.2 - 2.5  cantidad de partículas
+    tamano      0.5 - 2    tamaño de los rayos (por defecto 1)
+    altura      0.3 - 1.2  hasta dónde suben (por defecto 1 = hasta la cima)
+    viento      0 - 2      deriva lateral (por defecto .6)
+    enlaces     1 / 0      pequeños arcos eléctricos entre rayos cercanos
+    resplandor  1 / 0      brillo suave en el borde de abajo
+    fps         15 - 60    30 si el PC va justo
+    centro      0 - 0.9    cuánto baja la opacidad al pasar por la mitad de la pantalla (por defecto .55; 0 = nada)
+    zonas       1 / 0      se atenúan sobre el chat, los botones de TikTok y la cara del anfitrión
+
+  Efectos especiales (regalos / likes):
+    rayos.burst('descarga')  -> todos los rayos se cargan y sale una oleada de rayos nuevos
+    rayos.burst('chispas')   -> abanico de chispas rápidas
+    rayos.burst('tormenta')  -> lluvia densa de rayos
+    o postMessage({rayos:'descarga'})
+  Para probar en el navegador: teclas R (descarga), C (chispas), T (tormenta).
+-->
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent}
+/* Escenario vertical 9:16 (cámara de TikTok LIVE), centrado y ajustado a la ventana */
+#stage{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+  width:min(100vw,calc(100vh * 9 / 16));aspect-ratio:9/16;background:transparent}
+canvas{position:absolute;inset:0;display:block;width:100%;height:100%;background:transparent}
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="bolts"></canvas></div>
+<script>
+(()=>{
+const stage=document.getElementById('stage');
+const c=document.getElementById('bolts');
+const ctx=c.getContext('2d',{alpha:true});
+const TAU=Math.PI*2;
+const rand=(a,b)=>a+Math.random()*(b-a);
+const clamp=(v,a=0,b=1)=>Math.min(b,Math.max(a,v));
+const lerp=(a,b,t)=>a+(b-a)*t;
+const smooth=(a,b,x)=>{const t=clamp((x-a)/(b-a));return t*t*(3-2*t);};
+
+/* ---------- Ajustes por URL ---------- */
+const Q=new URLSearchParams(location.search);
+const num=(k,d)=>{const v=parseFloat(Q.get(k));return Number.isFinite(v)?v:d};
+const OPACITY=clamp(num('opacidad',.48),.05,1);
+const QTY=clamp(num('cantidad',1),.2,2.5);
+const SIZE=clamp(num('tamano',1),.5,2);
+const ALT=clamp(num('altura',1),.3,1.2);
+const WIND=clamp(num('viento',.6),0,2);
+const FPS=clamp(num('fps',60),15,60);
+const ZONES=num('zonas',1)!==0;
+const CENTER=clamp(num('centro',.55),0,.9);
+const LINKS=num('enlaces',1)!==0;
+const GLOW=num('resplandor',1)!==0;
+
+/* ---------- Colores (por defecto, el amarillo de tu rayo) ---------- */
+const COLORS={
+  amarillo:{core:[255,252,225],mid:[255,214,40],edge:[255,140,10]},
+  azul:{core:[235,248,255],mid:[90,190,255],edge:[40,90,255]},
+  morado:{core:[248,238,255],mid:[190,110,255],edge:[110,40,230]},
+  verde:{core:[235,255,240],mid:[90,255,140],edge:[20,170,70]},
+  rojo:{core:[255,236,236],mid:[255,90,90],edge:[200,20,30]}
+};
+const ALIAS={yellow:'amarilla',blue:'azul',purple:'morado',violeta:'morado',green:'verde',red:'rojo',amarilla:'amarillo'};
+let cn=(Q.get('color')||'amarillo').toLowerCase();cn=ALIAS[cn]||cn;
+const COL=COLORS[cn]||COLORS.amarillo;
+const rgba=(k,a)=>`rgba(${k[0]},${k[1]},${k[2]},${a})`;
+const mix=(a,b,t)=>[Math.round(lerp(a[0],b[0],t)),Math.round(lerp(a[1],b[1],t)),Math.round(lerp(a[2],b[2],t))];
+
+// Silueta del rayo ⚡ (como el emoji de tu logo), alto de -1 a 1
+const BOLT=[[.18,-1],[.62,-1],[.18,-.18],[.58,-.18],[-.38,1.05],[-.08,.12],[-.5,.12]];
+function boltPath(sc,ox=0,oy=0){
+  ctx.beginPath();
+  ctx.moveTo(BOLT[0][0]*sc+ox,BOLT[0][1]*sc+oy);
+  for(let i=1;i<BOLT.length;i++) ctx.lineTo(BOLT[i][0]*sc+ox,BOLT[i][1]*sc+oy);
+  ctx.closePath();
+}
+
+let w=1,h=1,dpr=1,K=1,particles=[],boostT=0;
+
+/* ---------- Zonas: se atenúan (sin desaparecer) sobre la interfaz de TikTok ---------- */
+function zoneFactor(x,y){
+  const nx=x/w, ny=y/h; let f=1, host=1;
+  if(ZONES){
+    if(ny>.7) f*=1-.6*clamp((ny-.7)/.1);                               // chat
+    const side=clamp((nx-.76)/.06), vert=Math.min(clamp((ny-.3)/.05),clamp((.92-ny)/.04));
+    f*=1-.4*side*vert;                                                  // botones
+    if(ny<.07) f*=.5+.5*clamp(ny/.07);                                  // barra superior
+    const dx=(nx-.5)/.3, dy=(ny-.4)/.2, d=dx*dx+dy*dy;
+    if(d<1) host=.4+.6*d;                                               // cara del anfitrión
+  }
+  // franja del medio de la pantalla: al pasar por la mitad baja la opacidad
+  const band=1-CENTER*(1-smooth(0,.17,Math.abs(ny-.5)));
+  return f*Math.min(host,band);
+}
+
+/* ---------- Viento suave con ráfagas ---------- */
+function windAt(ts){
+  const gust=Math.pow(Math.max(0,Math.sin(ts*.0002+.5)),6)*.45;
+  return (Math.sin(ts*.00031)*.18+Math.sin(ts*.00093+1.3)*.1+gust)*WIND;
+}
+
+/* ---------- Partículas: nacen abajo y suben hasta la cima ---------- */
+function build(initial,forced){
+  const r=Math.random();
+  const shape=forced||(r<.30?'dot':r<.50?'spark':r<.62?'zig':'bolt');
+  const depth=Math.random();                       // 0 = lejos, 1 = cerca
+  const y0=h-rand(0,h*.1);
+  const reach=h*ALT*rand(.8,1.25)*(shape==='streak'?rand(.6,1):1);
+  const prog0=initial?rand(0,1):0;
+  const p={
+    shape,depth,
+    size:lerp(.8,2.2,depth)*rand(.8,1.3)*(shape==='zig'?1.4:1),
+    bsize:lerp(5,13,depth)*rand(.85,1.2)*SIZE,   // tamaño de los rayos (alto ≈ 2·bsize·K)
+    x:rand(0,w), y0, reach, y:y0-prog0*reach, age:prog0,
+    vx:rand(-.12,.12),
+    vy:lerp(.2,.6,depth)*rand(.8,1.2)*(shape==='streak'?1.6:1),
+    alpha:lerp(.55,1,depth)*rand(.8,1),
+    phase:rand(0,TAU), sway:rand(.12,.55),
+    tilt:rand(-.6,.6),
+    fl:1, flare:0, zt:0, zp:null, vis:0,
+    temp:false, dead:false, zf:1
+  };
+  if(shape==='streak') p.size*=.8;
+  return p;
+}
+
+/* ---------- Efectos especiales ---------- */
+function sparks(count){
+  const cx=rand(w*.3,w*.7), add=[];
+  for(let i=0;i<count;i++){
+    const p=build(false,'streak');
+    p.temp=true;p.depth=rand(.5,1);p.size=rand(1.3,2.2);p.alpha=rand(.8,1);
+    p.x=cx+rand(-w*.08,w*.08);p.y=h+rand(0,60);p.y0=p.y;p.reach=h*rand(.6,1.1);
+    p.vy=rand(.9,2);p.vx=rand(-.9,.9);
+    add.push(p);
+  }
+  return add;
+}
+function newBolt(depthMin){
+  const p=build(false,'bolt');
+  p.temp=true;p.depth=rand(depthMin,1);p.bsize=lerp(5,13,p.depth)*rand(.9,1.2)*SIZE;p.alpha=1;
+  p.x=rand(w*.08,w*.92);p.y=h+rand(0,120);p.y0=p.y;p.reach=h*rand(.6,1.15);p.vy*=rand(1.5,2.3);
+  return p;
+}
+function burst(kind){
+  const k=String(kind||'').toLowerCase();
+  if(k.startsWith('des')||k.startsWith('ray')){
+    boostT=1;
+    for(const p of particles) if(p.shape!=='dot'&&p.shape!=='streak') p.flare=1;   // todos se cargan
+  }
+  if(particles.reduce((n,t)=>n+(t.temp?1:0),0)>200) return;
+  const add=[];
+  if(k.startsWith('chi')||k.startsWith('spa')) add.push(...sparks(50));
+  else if(k.startsWith('des')||k.startsWith('ray')){
+    add.push(...sparks(24));
+    for(let i=0;i<16;i++) add.push(newBolt(.4));
+  }else if(k.startsWith('tor')||k.startsWith('sto')){
+    for(let i=0;i<46;i++) add.push(newBolt(0));
+    add.push(...sparks(30));
+  }
+  particles.push(...add);
+}
+
+/* ---------- Resplandor suave del borde de abajo ---------- */
+function drawFloorGlow(ts,dt){
+  if(!GLOW) return;
+  boostT=Math.max(0,boostT-.006*dt);
+  const boost=1+.8*smooth(0,1,boostT);
+  const fl=.85+.15*Math.sin(ts*.0031)+.08*Math.sin(ts*.0113);
+  const g=ctx.createLinearGradient(0,h,0,h*.78);
+  const a=Math.min(1,OPACITY*1.2)*fl*boost;
+  g.addColorStop(0,rgba(COL.mid,Math.min(1,.34*a)));
+  g.addColorStop(.5,rgba(COL.edge,Math.min(1,.13*a)));
+  g.addColorStop(1,rgba(COL.edge,0));
+  ctx.fillStyle=g;
+  ctx.fillRect(0,h*.78,w,h*.22);
+}
+
+/* ---------- Dibujo de una partícula ---------- */
+function zigzag(len,amp,n){
+  const pts=[];
+  for(let i=0;i<n;i++) pts.push([(i===0||i===n-1)?0:rand(-1,1)*amp,(i/(n-1)-.5)*len]);
+  return pts;
+}
+function drawParticle(p,dx,dy){
+  const s=p.size*K, bs=p.bsize*K;
+  const env=smooth(0,.05,p.age)*(1-smooth(.75,1,p.age));      // aparece y se apaga suave
+  const tw=.85+.15*Math.sin(p.phase*2.1);
+  p.vis=env*p.zf*p.fl;
+  const a=p.alpha*OPACITY*p.zf*env*tw*p.fl;
+  if(a<.01) return;
+  const fx=1+.6*p.flare;
+
+  ctx.save();
+  ctx.translate(p.x,p.y);
+
+  // resplandor (siempre aditivo)
+  const gr=(p.shape==='bolt'?bs*3.2:p.shape==='zig'?s*4:s*5.2)*fx;
+  ctx.globalCompositeOperation='lighter';
+  const gl=ctx.createRadialGradient(0,0,0,0,0,gr);
+  const ga=Math.min(1,a*fx);
+  gl.addColorStop(0,rgba(COL.core,ga*(p.shape==='bolt'?.55:1)));
+  gl.addColorStop(.25,rgba(COL.mid,ga*.5));
+  gl.addColorStop(.55,rgba(COL.edge,ga*.2));
+  gl.addColorStop(1,rgba(COL.edge,0));
+  ctx.fillStyle=gl;
+  ctx.beginPath();ctx.arc(0,0,gr,0,TAU);ctx.fill();
+
+  if(p.shape==='bolt'){
+    // Rayo ⚡ sólido: degradado amarillo→naranja, borde, brillo y destello blanco al cargarse
+    ctx.globalCompositeOperation='source-over';
+    ctx.globalAlpha=clamp(a*2.1);
+    ctx.rotate(p.tilt+Math.sin(p.phase)*.18);
+    const g=ctx.createLinearGradient(0,-bs*1.05,0,bs*1.05);
+    g.addColorStop(0,rgba(mix(COL.core,COL.mid,.35),1));
+    g.addColorStop(.5,rgba(COL.mid,1));
+    g.addColorStop(1,rgba(COL.edge,1));
+    boltPath(bs);
+    ctx.fillStyle=g;ctx.fill();
+    ctx.lineJoin='round';
+    ctx.lineWidth=Math.max(1,bs*.1);
+    ctx.strokeStyle=rgba(COL.edge,.95);ctx.stroke();
+    // brillo interior
+    boltPath(bs*.5,-bs*.04,-bs*.24);
+    ctx.fillStyle=rgba(COL.core,.55);ctx.fill();
+    // destello de carga
+    if(p.flare>.05){
+      boltPath(bs);
+      ctx.fillStyle=rgba(COL.core,clamp(.9*p.flare));ctx.fill();
+      ctx.globalCompositeOperation='lighter';
+      ctx.lineCap='round';
+      for(let k=0;k<3;k++){                                  // mini arcos que saltan del rayo
+        const ang=rand(0,TAU), r0=bs*.55;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(ang)*r0,Math.sin(ang)*r0);
+        let rr=r0;
+        for(let i=0;i<3;i++){
+          rr+=bs*.38;
+          const aa=ang+rand(-.45,.45);
+          ctx.lineTo(Math.cos(aa)*rr,Math.sin(aa)*rr);
+        }
+        ctx.strokeStyle=rgba(COL.core,clamp(.9*p.flare));
+        ctx.lineWidth=Math.max(.8,bs*.07);ctx.stroke();
+      }
+    }
+  }else if(p.shape==='zig'){
+    // arco en zigzag que crepita
+    if(!p.zp||p.zt<=0){p.zt=rand(3,8);p.zp=zigzag(s*(4.5+p.depth*4),s*1.1,Math.floor(rand(5,8)));}
+    ctx.rotate(p.tilt+Math.sin(p.phase)*.2);
+    ctx.lineJoin='round';ctx.lineCap='round';
+    ctx.beginPath();
+    ctx.moveTo(p.zp[0][0],p.zp[0][1]);
+    for(let i=1;i<p.zp.length;i++) ctx.lineTo(p.zp[i][0],p.zp[i][1]);
+    ctx.strokeStyle=rgba(COL.mid,a*.85);ctx.lineWidth=Math.max(1.4,s*.5);ctx.stroke();
+    ctx.strokeStyle=rgba(COL.core,a);ctx.lineWidth=Math.max(.8,s*.18);ctx.stroke();
+  }else if(p.shape==='spark'){
+    ctx.fillStyle=rgba(COL.core,a);
+    ctx.beginPath();ctx.ellipse(0,0,s*2.4,s*.28,0,0,TAU);ctx.fill();
+    ctx.beginPath();ctx.ellipse(0,0,s*.28,s*2.4,0,0,TAU);ctx.fill();
+    ctx.beginPath();ctx.arc(0,0,s*.5,0,TAU);ctx.fill();
+  }else if(p.shape==='streak'){
+    ctx.rotate(Math.atan2(-dx,dy));
+    const len=s*(7+9*p.depth);
+    const tg=ctx.createLinearGradient(0,0,0,-len);
+    tg.addColorStop(0,rgba(COL.mid,a));
+    tg.addColorStop(1,rgba(COL.edge,0));
+    ctx.fillStyle=tg;
+    ctx.beginPath();ctx.moveTo(-s*.4,0);ctx.lineTo(s*.4,0);ctx.lineTo(0,-len);ctx.closePath();ctx.fill();
+    ctx.fillStyle=rgba(COL.core,a);
+    ctx.beginPath();ctx.ellipse(0,0,s*.42,s*.9,0,0,TAU);ctx.fill();
+  }else{
+    ctx.fillStyle=rgba(COL.core,a);
+    ctx.beginPath();ctx.arc(0,0,s*.6,0,TAU);ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ---------- Arcos eléctricos entre partículas cercanas ---------- */
+function drawLinks(ts){
+  if(!LINKS) return;
+  const LD=130*K, LD2=LD*LD, MIN2=(20*K)*(20*K), slot=Math.floor(ts/150), n=particles.length;
+  let drawn=0;
+  ctx.save();
+  ctx.globalCompositeOperation='lighter';
+  ctx.lineJoin='round';ctx.lineCap='round';
+  for(let i=0;i<n&&drawn<7;i++){
+    const A=particles[i];
+    if(A.vis<.25||A.shape==='streak'||A.shape==='dot') continue;
+    for(let j=i+1;j<n&&drawn<7;j++){
+      const B=particles[j];
+      if(B.vis<.25||B.shape==='streak'||B.shape==='dot') continue;
+      const ddx=B.x-A.x, ddy=B.y-A.y, d2=ddx*ddx+ddy*ddy;
+      if(d2>LD2||d2<MIN2) continue;
+      if(((i*131+j*17+slot*7)%7)!==0) continue;      // cada enlace dura ~150 ms y cambia de pareja
+      const d=Math.sqrt(d2);
+      const a=OPACITY*.8*Math.min(A.vis,B.vis)*(1-d/LD);
+      if(a<.02) continue;
+      const nx=-ddy/d, ny=ddx/d, segs=6;
+      ctx.beginPath();
+      ctx.moveTo(A.x,A.y);
+      for(let k=1;k<segs;k++){
+        const t=k/segs, off=rand(-1,1)*d*.14;
+        ctx.lineTo(A.x+ddx*t+nx*off,A.y+ddy*t+ny*off);
+      }
+      ctx.lineTo(B.x,B.y);
+      ctx.strokeStyle=rgba(COL.mid,a*.8);ctx.lineWidth=Math.max(1.4,K*.9);ctx.stroke();
+      ctx.strokeStyle=rgba(COL.core,a);ctx.lineWidth=Math.max(.8,K*.35);ctx.stroke();
+      drawn++;
+    }
+  }
+  ctx.restore();
+}
+
+/* ---------- Tamaño y bucle ---------- */
+function resize(){
+  const r=stage.getBoundingClientRect();
+  w=Math.max(1,r.width); h=Math.max(1,r.height);
+  K=Math.max(.8,w/420);
+  dpr=Math.min(devicePixelRatio||1,2);
+  c.width=Math.round(w*dpr); c.height=Math.round(h*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  const count=Math.max(12,Math.round(clamp(Math.round(w*h/20000),28,56)*QTY));
+  particles=Array.from({length:count},()=>build(true));
+}
+
+let last=0;
+function frame(ts){
+  requestAnimationFrame(frame);
+  if(!last) last=ts;
+  const el=ts-last;
+  if(el<1000/FPS-2) return;
+  last=ts;
+  const dt=clamp(el/16.667,.2,3);
+  const wind=windAt(ts);
+
+  ctx.clearRect(0,0,w,h);
+  drawFloorGlow(ts,dt);
+
+  const order=particles.slice().sort((a,b)=>a.depth-b.depth);   // lejanas primero
+  for(const p of order){
+    p.phase+=.015*dt;
+    p.zt-=dt;
+    p.vx+=(Math.random()-.5)*.012*dt;       // turbulencia
+    p.vx*=Math.pow(.995,dt);
+    p.vx=clamp(p.vx,-.45,.45);
+    let dx=(p.vx+Math.sin(p.phase)*p.sway*.16+wind*(.3+p.depth*.7))*K;
+    const dy=-p.vy*K;
+    if(p.shape==='zig'||p.shape==='spark') dx+=rand(-.5,.5)*K;   // temblor eléctrico
+    p.x+=dx*dt; p.y+=dy*dt;
+    p.age=(p.y0-p.y)/p.reach;               // progreso del recorrido: 0 abajo, 1 al final
+    // parpadeo eléctrico suave (los rayos casi no parpadean, para que se vean bien)
+    const dim=p.shape==='bolt'?.75:.4;
+    const target=Math.random()<.05?dim:1;
+    p.fl+=(target-p.fl)*Math.min(1,.45*dt);
+    if(p.shape!=='dot'&&Math.random()<(p.shape==='bolt'?.004:.002)*dt) p.flare=1;   // destello de carga
+    p.flare=Math.max(0,p.flare-.035*dt);
+
+    if(p.age>=1||p.y<-60*K||p.x<-60*K||p.x>w+60*K){
+      if(p.temp){p.dead=true;continue;}
+      Object.assign(p,build(false));
+    }
+    p.zf=zoneFactor(p.x,p.y);
+    drawParticle(p,dx,dy);
+  }
+  if(particles.some(t=>t.dead)) particles=particles.filter(t=>!t.dead);
+  drawLinks(ts);
+}
+
+window.rayos={burst};
+window.addEventListener('message',e=>{const d=e.data;if(d&&d.rayos)burst(d.rayos);});
+window.addEventListener('keydown',e=>{
+  const m={r:'descarga',c:'chispas',t:'tormenta'}[(e.key||'').toLowerCase()];
+  if(m) burst(m);
+});
+window.addEventListener('resize',resize);
+if(window.ResizeObserver)new ResizeObserver(resize).observe(stage);
+resize();requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
